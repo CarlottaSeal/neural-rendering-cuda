@@ -14,6 +14,7 @@
 #include <iostream>
 #include <vector>
 #include "rasterizer.h"
+#include "opt_switches.h"  // ImageState's layout depends on OPT_TILE_ORDER (not config.h: see opt_switches.h)
 #include <cuda_runtime_api.h>
 
 namespace CudaRasterizer
@@ -48,6 +49,15 @@ namespace CudaRasterizer
 		uint2* ranges;
 		uint32_t* n_contrib;
 		float* accum_alpha;
+#if OPT_TILE_ORDER
+		// sized by pixel count N, an upper bound on the tile count (as upstream does for `ranges`)
+		uint32_t* tile_load;
+		uint32_t* tile_load_sorted;
+		uint32_t* tile_ids;
+		uint32_t* tile_order;
+		size_t tile_sort_size;
+		char* tile_sort_space;
+#endif
 
 		static ImageState fromChunk(char*& chunk, size_t N);
 	};

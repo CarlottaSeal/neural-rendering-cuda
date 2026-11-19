@@ -175,8 +175,31 @@ CudaRasterizer::ImageState CudaRasterizer::ImageState::fromChunk(char*& chunk, s
 	obtain(chunk, img.accum_alpha, N, 128);
 	obtain(chunk, img.n_contrib, N, 128);
 	obtain(chunk, img.ranges, N, 128);
+#if OPT_TILE_ORDER
+	obtain(chunk, img.tile_load, N, 128);
+	obtain(chunk, img.tile_load_sorted, N, 128);
+	obtain(chunk, img.tile_ids, N, 128);
+	obtain(chunk, img.tile_order, N, 128);
+	cub::DeviceRadixSort::SortPairsDescending(
+		nullptr, img.tile_sort_size,
+		img.tile_load, img.tile_load_sorted,
+		img.tile_ids, img.tile_order, N);
+	obtain(chunk, img.tile_sort_space, img.tile_sort_size, 128);
+#endif
 	return img;
 }
+
+#if OPT_TILE_ORDER
+// Workload key per tile (Gaussians in its range) and the identity permutation to sort along with it.
+__global__ void tileLoads(int num_tiles, const uint2* ranges, uint32_t* load, uint32_t* ids)
+{
+	auto t = cg::this_grid().thread_rank();
+	if (t >= num_tiles)
+		return;
+	load[t] = ranges[t].y - ranges[t].x;
+	ids[t] = t;
+}
+#endif
 
 CudaRasterizer::BinningState CudaRasterizer::BinningState::fromChunk(char*& chunk, size_t P)
 {
@@ -322,6 +345,21 @@ int CudaRasterizer::Rasterizer::forward(
 			imgState.ranges);
 	CHECK_CUDA(, debug)
 
+	const uint32_t* tile_order = nullptr;
+#if OPT_TILE_ORDER
+	// Heaviest tile first. 2170 keys at 980x545, so this is a few small launches.
+	{
+		const int num_tiles = tile_grid.x * tile_grid.y;
+		tileLoads << <(num_tiles + 255) / 256, 256 >> > (num_tiles, imgState.ranges, imgState.tile_load, imgState.tile_ids);
+		CHECK_CUDA(, debug)
+		CHECK_CUDA(cub::DeviceRadixSort::SortPairsDescending(
+			imgState.tile_sort_space, imgState.tile_sort_size,
+			imgState.tile_load, imgState.tile_load_sorted,
+			imgState.tile_ids, imgState.tile_order, num_tiles), debug)
+		tile_order = imgState.tile_order;
+	}
+#endif
+
 	// Let each tile blend its range of Gaussians independently in parallel
 	const float* feature_ptr = colors_precomp != nullptr ? colors_precomp : geomState.rgb;
 	CHECK_CUDA(FORWARD::render(
@@ -337,7 +375,8 @@ int CudaRasterizer::Rasterizer::forward(
 		background,
 		out_color,
 		geomState.depths,
-		depth), debug)
+		depth,
+		tile_order), debug)
 
 	return num_rendered;
 }
@@ -400,6 +439,11 @@ void CudaRasterizer::Rasterizer::backward(
 	// opacity and RGB of Gaussians from per-pixel loss gradients.
 	// If we were given precomputed colors and not SHs, use them.
 	const float* color_ptr = (colors_precomp != nullptr) ? colors_precomp : geomState.rgb;
+#if OPT_TILE_ORDER
+	const uint32_t* tile_order = imgState.tile_order;  // written by the forward into the saved image buffer
+#else
+	const uint32_t* tile_order = nullptr;
+#endif
 	CHECK_CUDA(BACKWARD::render(
 		tile_grid,
 		block,
@@ -419,7 +463,8 @@ void CudaRasterizer::Rasterizer::backward(
 		(float4*)dL_dconic,
 		dL_dopacity,
 		dL_dcolor,
-		dL_dinvdepth), debug);
+		dL_dinvdepth,
+		tile_order), debug);
 
 	// Take care of the rest of preprocessing. Was the precomputed covariance
 	// given to us or a scales/rot pair? If precomputed, pass that. If not,

@@ -14,9 +14,9 @@ Pipeline: preprocess (EWA projection to 2D) → tile binning (16×16) → CUB ra
 | Phase | Work | Status |
 |---|---|---|
 | 1.1 | Build the official rasterizer on Windows/sm_120 and train a baseline on T&T train/truck and DB playroom/drjohnson | train done (22.16 dB); truck/playroom/drjohnson todo |
-| 1.2 | Nsight Compute profile of `preprocessCUDA`, `renderCUDA`, `renderCUDA` backward, `duplicateWithKeys`; annotated source notes | nsys per-kernel breakdown done (`kernel_breakdown.py`, README). Open: ncu on backward `renderCUDA` |
-| 1.3 | 2–3 optimizations | done: smem feature cache, warp-reduced grad atomics, separate SH dc/rest (no `torch.cat`). Possible #4: FP16 evaluation or load balancing in backward `renderCUDA` (46% of step) |
-| 1.4 | Benchmark: PSNR within 0.1 dB of baseline; report FPS, it/s, peak memory | train scene: fwd+bwd 1.82×, fwd 227 FPS, −200 MiB; end-to-end training 1.72× (3 seeds/build), test PSNR −0.03 dB (within noise). Open: other 3 scenes |
+| 1.2 | Nsight Compute profile of `preprocessCUDA`, `renderCUDA`, `renderCUDA` backward, `duplicateWithKeys`; annotated source notes | done: nsys per-kernel breakdown (`kernel_breakdown.py`), ncu on `renderCUDA` fwd/bwd, tile-load histogram (`tile_load.py`); findings in the P1 README |
+| 1.3 | 2–3 optimizations | done (4): smem feature cache, warp-reduced grad atomics, separate SH dc/rest (no `torch.cat`), heaviest-first tile order. Rejected: FP16 (pipes not saturated). Not done: splitting the heaviest tiles |
+| 1.4 | Benchmark: PSNR within 0.1 dB of baseline; report FPS, it/s, peak memory | train scene: all4 fwd 259 FPS, fwd+bwd 1.07× over all3; all3 end-to-end training 1.72× (3 seeds/build), test PSNR −0.03 dB (within noise). Open: other 3 scenes with all4 |
 
 ## Project 2 — Instant-NGP from scratch (weeks 5–9) · `p2-ingp/`
 

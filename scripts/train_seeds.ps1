@@ -8,6 +8,7 @@ $defines = @{
   "upstream" = $null
   "both"     = "OPT_SHMEM_FEATURES=1 OPT_WARP_REDUCE_GRADS=1"
   "all3"     = "OPT_SHMEM_FEATURES=1 OPT_WARP_REDUCE_GRADS=1 OPT_SEPARATE_SH=1"
+  "all4"     = "OPT_SHMEM_FEATURES=1 OPT_WARP_REDUCE_GRADS=1 OPT_SEPARATE_SH=1 OPT_TILE_ORDER=1"
 }
 $data = Get-ChildItem -Directory -Path data\tandt, data\db -Filter $Scene | Select-Object -First 1
 if (-not $data) { throw "scene $Scene not found under data\tandt or data\db" }

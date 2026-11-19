@@ -3,7 +3,7 @@
 The starting point is the official [graphdeco-inria/gaussian-splatting](https://github.com/graphdeco-inria/gaussian-splatting)
 (commit `54c035f`), built on Windows 11 / MSVC 2022 / CUDA 13.2 / PyTorch 2.14 cu130 for an RTX 5070 Ti (sm_120).
 `rasterizer/` is a copy of its `diff-gaussian-rasterization` submodule, with optimizations behind
-compile-time switches (`cuda_rasterizer/config.h`). With every switch off, the code is upstream unchanged.
+compile-time switches (`cuda_rasterizer/opt_switches.h`). With every switch off, the code is upstream unchanged.
 
 Upstream code is under the Inria non-commercial research license (`rasterizer/LICENSE.md`).
 
@@ -30,6 +30,7 @@ gradients to 3D mean, scale, rotation, and SH.
 | `OPT_SHMEM_FEATURES` | forward `renderCUDA` | Stage RGB and 1/depth into shared memory during the batch fetch. Upstream instead does a dependent global gather `features[collected_id[j]*3+ch]` inside the per-pixel loop. (The backward already does this; the forward did not.) |
 | `OPT_WARP_REDUCE_GRADS` | backward `renderCUDA` | All 32 lanes of a warp process the same Gaussian `j` at the same time. Keep them in lockstep, put each lane's gradient contribution in registers, `__shfl_down` reduce the 9–10 values, and have one lane issue the atomics. Upstream issues up to 32× that many same-address atomics. When only one lane contributes, the shuffles are skipped. |
 | `OPT_SEPARATE_SH` | `preprocessCUDA` fwd/bwd, bindings | Take `features_dc` [P,1,3] and `features_rest` [P,15,3] as two inputs and return two gradients. Upstream's renderer calls `GaussianModel.get_features`, a `torch.cat` that copies all 48 floats per Gaussian (≈210 MB at 1.1M Gaussians) on every render. The SH code addresses coefficients through one pointer helper (`shPointers`, `auxiliary.h`), so every `sh[k]` / `dL_dsh[k]` line stays as upstream wrote it. Python sees `diff_gaussian_rasterization.SEPARATE_SH`. |
+| `OPT_TILE_ORDER` | forward + backward `renderCUDA` | Launch tiles heaviest-first. After `identifyTileRanges`, the 2170 tiles are radix-sorted by range length, and block `b` renders tile `tile_order[b]` instead of tile `b`. The order is computed once in the forward and stored in the image buffer, so the backward reuses it. Chosen from the ncu profile below. |
 
 ## Results
 
@@ -53,6 +54,20 @@ back to back and benchmarked twice each in the same session (the table shows the
 |---|---|---|---|---|---|---|
 | both (rerun) | 22.157 | 5.86 | 171 | 13.76 | 1.65× | 3897 |
 | both + `OPT_SEPARATE_SH` | 22.157 | **4.36** | **229** | **12.39** | **1.83×** | **3697** |
+
+`OPT_TILE_ORDER` was added after the ncu analysis. Same procedure: all3 and all4 were rebuilt back to back,
+2 runs each, mean shown:
+
+| variant | PSNR | fwd ms | FPS | fwd+bwd ms | vs all3 | peak MiB |
+|---|---|---|---|---|---|---|
+| all3 (rerun) | 22.157 | 4.15 | 241 | 11.88 | 1.00× | 3697 |
+| all3 + `OPT_TILE_ORDER` (**all4**) | 22.157 | **3.86** | **259** | **11.15** | **1.07×** (fwd 1.08×) | 3709 |
+| `OPT_TILE_ORDER` alone | 22.157 | 5.53 | 181 | 21.11 | – | 3910 |
+
+Gradient check for all4: worst relative error 4.4e-3, with renders and depths bit-identical to upstream. This
+all3 rerun is about 4% faster than the earlier all3 measurements (12.35–12.49 ms), which is drift
+between sessions. Only same-session pairs are compared here. The extra 12 MiB holds the per-tile key,
+permutation, and sort buffers.
 
 The forward gain (−1.50 ms) is slightly larger than the `CatArrayBatchedCopy` kernel time (1.39–1.42 ms/step
 in nsys). The rest is plausibly the 210 MB allocation that no longer happens per render, but that has not been measured separately.
@@ -113,6 +128,54 @@ Each column comes from a separate 5-step capture. The `renderCUDA` code is the s
 so their 0.15–0.45 ms difference is run-to-run variation. After these changes, backward `renderCUDA` is still
 46% of GPU time and is the next target.
 
+### Nsight Compute: `renderCUDA` with all three switches
+
+One fwd+bwd step on test view 0, `--set full`. ncu locks clocks, so its durations run longer than nsys's.
+
+| metric | forward | backward |
+|---|---|---|
+| duration (ncu) | 3.54 ms | 8.05 ms |
+| compute / memory throughput | 44.6% / 22.7% | 50.1% / 50.1% (L1 72%, DRAM 4.8%) |
+| registers/thread → theoretical occupancy | 39 → 100% | 60 → 66.7% |
+| achieved occupancy | 87.8% | 62.5% |
+| **SM active cycles min / avg / max** | 4.29M / 5.13M / **8.70M** | 11.87M / 12.94M / **18.21M** |
+| **max / avg SM active** | **1.70×** | **1.41×** |
+| top stalls (cycles per issued instruction) | not_selected 4.5, wait 2.7, barrier 1.8 | not_selected 2.2, barrier 2.0, wait 2.0, mio_throttle 1.6 |
+| shared-memory bank conflicts | 0.13% of wavefronts | 0.09% of wavefronts |
+| global reductions (atomics) | – | 38.3M requests |
+
+Neither kernel is bound by bandwidth or math, and no single stall reason dominates. The clearest signal is
+the gap between the busiest SM and the average SM. The kernel ends when its slowest SM finishes, and that
+SM runs 41% (backward) or 70% (forward) longer than average. This is load imbalance across tiles.
+
+`tile_load.py` reproduces the binning in PyTorch to count the Gaussians in each tile's range (view 0, 2170 tiles,
+5.03M tile/Gaussian pairs):
+
+| per-tile Gaussians | mean | median | p90 | p99 | max |
+|---|---|---|---|---|---|
+| view 0 | 2,320 | 1,472 | 4,452 | 15,422 | **27,189 (11.7× mean)** |
+
+The heaviest 13% of tiles (280) hold 43.7% of the work. The upstream kernel launches tiles in row-major
+order, so whichever heavy tiles are launched last make up the tail. With 4 resident blocks per SM in the
+backward, the heaviest tile alone is 1.51× the work of a perfectly balanced slot. That means reordering tiles
+heaviest-first cannot fully close the gap, and the top tiles would also need to be split. These counts ignore
+early termination, so they overstate saturated tiles. FP16 evaluation is not pursued, because the math and
+memory pipes are not the limit.
+
+**After `OPT_TILE_ORDER`** (same ncu setup):
+
+| | SM active max / avg (fwd) | SM active max / avg (bwd) | bwd avg active / elapsed | bwd achieved occupancy |
+|---|---|---|---|---|
+| all3 | 8.70M / 5.13M = 1.70× | 18.21M / 12.94M = 1.41× | 69% | 62.5% |
+| all4 | 7.34M / 4.84M = 1.52× | 14.80M / 12.49M = 1.19× | 85% | 65.6% |
+
+The backward's slowest SM dropped from 18.2M to 14.8M cycles, and the average SM workload barely changed.
+The gain comes from removing the tail, as intended. What remains matches the estimate above: in the forward,
+the heaviest tile alone is 2.27× a balanced slot, so reordering cannot remove it. **Not done (yet):**
+splitting the heaviest tiles across several blocks. That needs a per-tile partial blend plus a merge step in
+the forward, and a matching split of the per-pixel backward state, which is much more invasive than a
+launch-order permutation.
+
 ## Reproduce
 
 ```bat
@@ -136,5 +199,10 @@ pwsh scripts\train_seeds.ps1                       :: 30k-iteration training, up
 - `third_party/gaussian-splatting/train.py` has one local patch: it sets `separate_sh` from
   `diff_gaussian_rasterization.SEPARATE_SH` instead of from whether `SparseGaussianAdam` imports. With the
   upstream rasterizer installed, the attribute does not exist, so its behaviour is unchanged.
-- Next: Nsight Compute on backward `renderCUDA` (stall reasons, atomics throughput) to decide between FP16
-  evaluation and load balancing.
+- The fourth optimization also came from the profile. Stall reasons were spread out and no pipe was
+  saturated, so FP16 had nothing to fix. The SM active-cycle spread (`sm__cycles_active.max` vs `.avg`)
+  pointed straight at load imbalance.
+- Measure only back to back: the same build drifted ~4% between sessions, which is the same size as
+  some of the gains.
+- `config.h` defines `NUM_CHANNELS` as a macro, and a CUB template parameter has the same name. Including it
+  before `<cub/cub.cuh>` breaks the build, so the switches live in their own `opt_switches.h`.

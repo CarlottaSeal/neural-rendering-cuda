@@ -58,6 +58,18 @@ __forceinline__ __device__ T* shPointers(int idx, int max_coeffs, T* dc, T* shs,
 }
 #endif
 
+// Tile (x, y) rendered by the calling block. Upstream: the block's own grid position. With
+// OPT_TILE_ORDER, blocks are handed tiles heaviest-first through tile_order (linear block id -> tile id).
+__forceinline__ __device__ uint2 blockTile(const uint32_t* tile_order, uint32_t horizontal_blocks)
+{
+#if OPT_TILE_ORDER
+	const uint32_t t = tile_order[blockIdx.y * gridDim.x + blockIdx.x];
+	return { t % horizontal_blocks, t / horizontal_blocks };
+#else
+	return { blockIdx.x, blockIdx.y };
+#endif
+}
+
 __forceinline__ __device__ float ndc2Pix(float v, int S)
 {
 	return ((v + 1.0) * S - 1.0) * 0.5;

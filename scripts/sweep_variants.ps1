@@ -11,6 +11,8 @@ $variants = [ordered]@{
   "both"        = "OPT_SHMEM_FEATURES=1 OPT_WARP_REDUCE_GRADS=1"
   "sep_sh"      = "OPT_SEPARATE_SH=1"
   "all3"        = "OPT_SHMEM_FEATURES=1 OPT_WARP_REDUCE_GRADS=1 OPT_SEPARATE_SH=1"
+  "tile_order"  = "OPT_TILE_ORDER=1"
+  "all4"        = "OPT_SHMEM_FEATURES=1 OPT_WARP_REDUCE_GRADS=1 OPT_SEPARATE_SH=1 OPT_TILE_ORDER=1"
 }
 foreach ($name in $variants.Keys) {
   Write-Host "########## $name [$($variants[$name])]"
