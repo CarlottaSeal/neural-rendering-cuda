@@ -1,0 +1,3 @@
+[submodule "p1-3dgs/rasterizer/third_party/glm"]
+	path = p1-3dgs/rasterizer/third_party/glm
+	url = https://github.com/g-truc/glm.git

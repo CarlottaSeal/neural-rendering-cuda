@@ -1,0 +1,43 @@
+diff --git a/train.py b/train.py
+index 8206903..71b14e0 100644
+--- a/train.py
++++ b/train.py
+@@ -40,6 +40,11 @@ try:
+ except:
+     SPARSE_ADAM_AVAILABLE = False
+ 
++# neural-rendering-cuda patch: a rasterizer built with OPT_SEPARATE_SH takes features_dc / features_rest
++# separately (no torch.cat). Upstream builds lack the attribute, so their behaviour is unchanged.
++import diff_gaussian_rasterization as _dgr
++SEPARATE_SH = SPARSE_ADAM_AVAILABLE or getattr(_dgr, "SEPARATE_SH", False)
++
+ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+ 
+     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
+@@ -78,7 +83,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
+                 net_image_bytes = None
+                 custom_cam, do_training, pipe.convert_SHs_python, pipe.compute_cov3D_python, keep_alive, scaling_modifer = network_gui.receive()
+                 if custom_cam != None:
+-                    net_image = render(custom_cam, gaussians, pipe, background, scaling_modifier=scaling_modifer, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)["render"]
++                    net_image = render(custom_cam, gaussians, pipe, background, scaling_modifier=scaling_modifer, use_trained_exp=dataset.train_test_exp, separate_sh=SEPARATE_SH)["render"]
+                     net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
+                 network_gui.send(net_image_bytes, dataset.source_path)
+                 if do_training and ((iteration < int(opt.iterations)) or not keep_alive):
+@@ -108,7 +113,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
+ 
+         bg = torch.rand((3), device="cuda") if opt.random_background else background
+ 
+-        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE)
++        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SEPARATE_SH)
+         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+ 
+         if viewpoint_cam.alpha_mask is not None:
+@@ -155,7 +160,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
+                 progress_bar.close()
+ 
+             # Log and save
+-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
++            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SEPARATE_SH, None, dataset.train_test_exp), dataset.train_test_exp)
+             if (iteration in saving_iterations):
+                 print("\n[ITER {}] Saving Gaussians".format(iteration))
+                 scene.save(iteration)
