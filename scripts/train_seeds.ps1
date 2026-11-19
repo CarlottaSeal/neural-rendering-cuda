@@ -1,7 +1,10 @@
 # Full 30k-iteration training, several seeds per rasterizer build, then a mean ± std table.
 # Usage: pwsh scripts\train_seeds.ps1 [-Scene train] [-Seeds 0,1,2] [-Builds upstream,all3]
-param([string]$Scene = "train", [int[]]$Seeds = @(0, 1, 2), [string[]]$Builds = @("upstream", "all3"))
+param([string]$Scene = "train", [string[]]$Seeds = @("0", "1", "2"), [string[]]$Builds = @("upstream", "all3"))
 $ErrorActionPreference = "Stop"
+# `pwsh -File script.ps1 -Builds upstream,all4` passes ONE string "upstream,all4", not an array; split it
+$Builds = @($Builds | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+$Seeds = @($Seeds | ForEach-Object { "$_" -split ',' } | Where-Object { $_ } | ForEach-Object { [int]$_ })
 Set-Location (Split-Path $PSScriptRoot)
 $py = ".venv\Scripts\python.exe"
 $defines = @{
@@ -14,6 +17,7 @@ $data = Get-ChildItem -Directory -Path data\tandt, data\db -Filter $Scene | Sele
 if (-not $data) { throw "scene $Scene not found under data\tandt or data\db" }
 foreach ($b in $Builds) {
   Write-Host "########## build $b"
+  if ($b -ne "upstream" -and -not $defines.ContainsKey($b)) { throw "unknown build '$b' (known: upstream, $($defines.Keys -join ', '))" }
   if ($b -eq "upstream") { cmd /c "scripts\build_rasterizer.bat upstream > outputs\build_upstream.log 2>&1" }
   else { cmd /c "scripts\build_rasterizer.bat opt `"$($defines[$b])`" > outputs\build_$b.log 2>&1" }
   if ($LASTEXITCODE -ne 0) { throw "build failed for $b" }
