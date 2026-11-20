@@ -108,6 +108,19 @@ The seed-to-seed spread in train PSNR (0.7–0.85 dB std) is much larger than th
 (0.085 dB). The earlier −0.34 dB was therefore run-to-run noise, not an effect of the optimizations.
 Test PSNR is within 0.03 dB, which meets the ≤ 0.1 dB criterion.
 
+The other three scenes were trained once each (seed 0), upstream against all four switches. Wall time is
+measured the same way as in the 3-seed table:
+
+| scene | upstream wall | all4 wall | speedup | test PSNR upstream → all4 | train PSNR upstream → all4 | final #Gaussians (all4) |
+|---|---|---|---|---|---|---|
+| T&T truck | 1061.8 s | 664.0 s | **1.60×** | 25.443 → 25.450 (+0.007) | 27.661 → 27.691 | 2,059,347 |
+| DB playroom | 1447.9 s | 662.6 s | **2.19×** | 30.351 → 30.326 (−0.025) | 36.551 → 36.399 | 1,846,303 |
+| DB drjohnson | 1978.8 s | 994.6 s | **1.99×** | 29.471 → 29.541 (+0.070) | 37.179 → 37.448 | 3,101,085 |
+
+On every scene, test PSNR is within 0.07 dB of upstream. With one seed per scene, these differences are within the seed spread
+measured on train. The speedup varies with the scene: the Deep Blending scenes gain more than truck. This
+README does not break that difference down per kernel.
+
 ## Profile (Nsight Systems)
 
 `profile_step.py` runs 5 NVTX-marked fwd+bwd steps on one test view, and `kernel_breakdown.py` sums the GPU

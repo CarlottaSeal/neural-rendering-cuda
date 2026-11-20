@@ -13,10 +13,10 @@ Pipeline: preprocess (EWA projection to 2D) → tile binning (16×16) → CUB ra
 
 | Phase | Work | Status |
 |---|---|---|
-| 1.1 | Build the official rasterizer on Windows/sm_120 and train a baseline on T&T train/truck and DB playroom/drjohnson | train done (22.16 dB); truck/playroom/drjohnson todo |
+| 1.1 | Build the official rasterizer on Windows/sm_120 and train a baseline on T&T train/truck and DB playroom/drjohnson | done: train 22.16 dB; truck 25.44, playroom 30.35, drjohnson 29.47 dB (upstream test PSNR) |
 | 1.2 | Nsight Compute profile of `preprocessCUDA`, `renderCUDA`, `renderCUDA` backward, `duplicateWithKeys`; annotated source notes | done: nsys per-kernel breakdown (`kernel_breakdown.py`), ncu on `renderCUDA` fwd/bwd, tile-load histogram (`tile_load.py`); findings in the P1 README |
 | 1.3 | 2–3 optimizations | done (4): smem feature cache, warp-reduced grad atomics, separate SH dc/rest (no `torch.cat`), heaviest-first tile order. Rejected: FP16 (pipes not saturated). Not done: splitting the heaviest tiles |
-| 1.4 | Benchmark: PSNR within 0.1 dB of baseline; report FPS, it/s, peak memory | train scene: all4 fwd 259 FPS, fwd+bwd 1.07× over all3; all3 end-to-end training 1.72× (3 seeds/build), test PSNR −0.03 dB (within noise). Open: other 3 scenes with all4 |
+| 1.4 | Benchmark: PSNR within 0.1 dB of baseline; report FPS, it/s, peak memory | train scene: all4 fwd 259 FPS, fwd+bwd 1.07× over all3; all3 end-to-end training 1.72× (3 seeds/build), test PSNR −0.03 dB (within noise). all4 vs upstream, 1 seed: truck 1.60×, playroom 2.19×, drjohnson 1.99×, test PSNR within 0.07 dB |
 
 ## Project 2 — Instant-NGP from scratch (weeks 5–9) · `p2-ingp/`
 

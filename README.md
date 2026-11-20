@@ -4,7 +4,7 @@ GPU kernel engineering for neural rendering, done as three projects. See [DEVPLA
 
 | Project | Directory | Status |
 |---|---|---|
-| 1. 3D Gaussian Splatting: study and optimize the official CUDA rasterizer | [`p1-3dgs/`](p1-3dgs/README.md) | baseline reproduced; 4 profile-driven optimizations: 1.72× end-to-end training on T&T train with the first 3 (3 seeds), test PSNR within 0.03 dB; heaviest-first tile order adds another 7% |
+| 1. 3D Gaussian Splatting: study and optimize the official CUDA rasterizer | [`p1-3dgs/`](p1-3dgs/README.md) | baseline reproduced; 4 profile-driven optimizations: 1.72× end-to-end training on T&T train with the first 3 (3 seeds), test PSNR within 0.03 dB; heaviest-first tile order adds another 7%; with all 4, truck / playroom / drjohnson train 1.60× / 2.19× / 1.99× faster (1 seed), test PSNR within 0.07 dB |
 | 2. Instant-NGP from scratch: hash encoding, fused WMMA MLP, volume rendering | `p2-ingp/` | not started |
 | 3. Differentiable soft rasterizer for mesh fitting | `p3-diffrast/` | not started |
 
