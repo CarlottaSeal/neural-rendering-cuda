@@ -11,7 +11,7 @@ a pure-PyTorch reference and against gradcheck before it is optimized.
 | `ingp/model.py` | NGP field: hash grid → 1×64 density MLP → σ (trunc-exp) + 15 features; SH(dir) + features → 2×64 color MLP |
 | `ingp/render.py` | 128³ occupancy grid, packed ray marching (dt = √3·3/1024), packed volume rendering with fp64 cumsum |
 | `ingp/data.py` | NeRF-synthetic loader; images stay on the GPU as uint8 |
-| `csrc/hash_encoding.cu` | CUDA hash encoding v0: one thread per (point, level), backward with float `atomicAdd` |
+| `csrc/hash_encoding.cu` | CUDA hash encoding. v0: one thread per (point, level), level-major grid, scalar `atomicAdd`. v1 (default): level-fastest threads, paired x-corner loads, vector atomics |
 | `csrc/march.cu` | CUDA ray marching v0: one thread per ray, count → scan → write packed samples; same rounding as the reference |
 | `csrc/bindings.cpp` | pybind module for the kernels |
 | `tests/test_march.py` | CUDA march vs reference (bitwise), plus timing |
@@ -107,6 +107,36 @@ the reference. The train time ratio (7.1×) compares against the reference run, 
 clean steady-state ratio is 148.5 / 20.3 = 7.3× per step. The 30k-in-under-20-minutes target is met (9.9 min).
 The memory peak drops because the march no longer materialises every candidate.
 
+**CUDA hash encoding v1** (`tests/test_cuda.py`). With the CUDA march in place, nsys put the encoding at about
+8 of the step's 17.8 GPU ms. Most of it, 4.9 ms, was the prune-pass forward on 1.1 M points. v0 maps
+`blockIdx.y` to the level. So a warp holds 32 points of one level, and each thread writes its 8 output bytes
+128 bytes away from its neighbour's. v1 makes the level the fastest index: a warp is 2 points × 16 levels,
+reads each point's x as a broadcast, and writes 256 contiguous bytes. The two corners that differ only in x
+are loaded as one `float4` when their indices are an aligned pair. That holds for dense levels with an even
+index and for hashed levels with even cx, because the x prime is 1. The backward uses `float4`/`float2`
+`atomicAdd` (sm_90+) for those pairs. The corners are accumulated in v0's order. Forward error against the
+reference is 3.0e-7 for both versions, and backward error is 3.9e-7 for v1 (5.6e-7 for v0).
+
+| hash encoding | random 262k, fwd | random 262k, fwd+bwd | Lego marched 1.12 M, fwd | Lego marched 1.12 M, fwd+bwd |
+|---|---|---|---|---|
+| v0 | 0.561 ms | 2.744 ms | 5.039 ms | 13.749 ms |
+| v1 | 0.449 ms | 2.444 ms | 0.901 ms | 4.536 ms |
+
+The gain is small on random points, which are bound by the scattered table gathers. It is 5.6× on the real
+prune input. Those points are coherent along rays, and the uncoalesced output writes were what limited v0
+there. With v1, the full step takes 14.5 ms (68.8 it/s): prune drops from 7.8 to 3.7 ms and backward from
+6.1 to 5.0 ms.
+
+**Lego, 30k iterations, seed 0** (all runs with the same settings):
+
+| run | test PSNR (200 images) | train time | it/s | peak memory |
+|---|---|---|---|---|
+| PyTorch reference | 35.04 dB | 4226 s | 7.1 | 7786 MiB |
+| CUDA encoding v0 + march | 35.00 dB | 596 s | 50.4 | 4449 MiB |
+| CUDA encoding v1 + march | 35.06 dB | 440 s | 68.1 | 4449 MiB |
+
+The quick test PSNR for v1 at 5k / 10k / 20k / 30k is 34.21 / 34.69 / 35.38 / 35.48 dB.
+
 ## History
 
 - The first 30k run ran out of memory at iteration ~2500. `march` materialised [rays × 1024] candidates,
@@ -115,7 +145,8 @@ The memory peak drops because the march no longer materialises every candidate.
 
 ## Next
 
-1. Profile the new step at kernel level. Prune (hash forward on 1.1 M candidates) and backward are the top phases.
-2. Fused compositing / transmittance kernels, forward and backward.
-3. Faster hash encoding (the v0 layout is one thread per point and level), then the fused MLP.
+1. Profile the v1 step at kernel level. Backward (5.0 ms) and prune (3.7 ms) are the top phases; the MLPs'
+   ReLU write-backs and small GEMMs are spread across both.
+2. Fused MLP (density and color), forward and backward.
+3. Fused compositing / transmittance kernels.
 4. Comparison with tiny-cuda-nn.

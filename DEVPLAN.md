@@ -22,7 +22,8 @@ Pipeline: preprocess (EWA projection to 2D) → tile binning (16×16) → CUB ra
 
 - Status: PyTorch reference done (Lego 35.04 dB, 6.7 it/s steady state, tests + gradcheck); CUDA hash encoding v0
   and CUDA march v0 (bitwise equal to the reference) done: Lego 35.00 dB, 30k iterations in 596 s (50.4 it/s),
-  so the < 20 min target is met. Next: prune and backward, compositing kernels, then the fused MLP
+  so the < 20 min target is met. Hash encoding v1 (coalesced, paired loads, vector atomics): 35.06 dB in 440 s
+  (68.1 it/s). Next: the fused MLP, then compositing kernels
 - Multi-resolution hash encoding, forward and backward (backward uses atomicAdd)
 - Fused MLP with Tensor Core WMMA, 64-wide layers
 - Volume rendering, forward and backward

@@ -26,14 +26,14 @@ def ext():
 
 class HashEncodeFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, table, res):
+    def forward(ctx, x, table, res, version):
         x = x.contiguous()
         ctx.save_for_backward(x, res)
-        ctx.shape = table.shape
-        return ext().hash_encode_fwd(x, table.contiguous(), res)
+        ctx.shape, ctx.version = table.shape, version
+        return ext().hash_encode_fwd(x, table.contiguous(), res, version)
 
     @staticmethod
     def backward(ctx, g):
         x, res = ctx.saved_tensors
         L, T, F = ctx.shape
-        return None, ext().hash_encode_bwd(x, g.contiguous(), res, T, F), None
+        return None, ext().hash_encode_bwd(x, g.contiguous(), res, T, F, ctx.version), None, None

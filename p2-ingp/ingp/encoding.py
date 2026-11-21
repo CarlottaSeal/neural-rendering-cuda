@@ -52,6 +52,7 @@ class HashEncoding(nn.Module):
         self.embeddings = nn.Parameter(torch.empty(n_levels, self.table_size, n_features).uniform_(-init_scale, init_scale))
         self.register_buffer("res_i32", torch.tensor(self.resolutions, dtype=torch.int32), persistent=False)
         self.backend = backend
+        self.cuda_version = 1  # csrc/hash_encoding.cu kernel version; 0 is the first port
 
     @property
     def out_dim(self):
@@ -61,7 +62,7 @@ class HashEncoding(nn.Module):
         """x: [N,3] in [0,1]. Returns [N, L*F]."""
         if self.backend == "cuda":
             from .cuda_ext import HashEncodeFn
-            return HashEncodeFn.apply(x, self.embeddings, self.res_i32)
+            return HashEncodeFn.apply(x, self.embeddings, self.res_i32, self.cuda_version)
         x = x.clamp(0.0, 1.0 - 1e-6)
         off = corner_offsets(x.device)
         out = []
