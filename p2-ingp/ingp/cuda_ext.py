@@ -10,6 +10,10 @@ _ext = None
 
 def ext():
     global _ext
+    if _ext is None and os.environ.get("INGP_PREBUILT"):
+        # under nsys, torch's `where cl` lookup fails and the JIT relinks with a bad linker path; load the cached build
+        from torch.utils.cpp_extension import _get_build_directory, _import_module_from_library
+        _ext = _import_module_from_library("ingp_cuda", _get_build_directory("ingp_cuda", False), True)
     if _ext is None:
         _ext = load(
             name="ingp_cuda",

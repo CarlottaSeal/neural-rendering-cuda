@@ -20,7 +20,8 @@ Pipeline: preprocess (EWA projection to 2D) → tile binning (16×16) → CUB ra
 
 ## Project 2 — Instant-NGP from scratch (weeks 5–9) · `p2-ingp/`
 
-- Status: PyTorch reference done (Lego 35.04 dB, 7.1 it/s, tests + gradcheck); CUDA hash encoding v0 done
+- Status: PyTorch reference done (Lego 35.04 dB, 6.7 it/s steady state, tests + gradcheck); CUDA hash encoding v0
+  done (22.9 it/s); step profiled: the march is 52 % of GPU time, the MLPs 4 %, so the march kernel comes next
 - Multi-resolution hash encoding, forward and backward (backward uses atomicAdd)
 - Fused MLP with Tensor Core WMMA, 64-wide layers
 - Volume rendering, forward and backward

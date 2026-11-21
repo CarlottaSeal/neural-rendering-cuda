@@ -20,6 +20,7 @@ def short(name):
     if m and not name.startswith("void at::native::reduce_kernel"):
         inner = re.findall(r"at::native::(?:<unnamed>::)?(\w+)", name)
         return "torch:" + "/".join(dict.fromkeys(inner[1:4] or inner[:1]))[:70]
+    name = re.sub(r"<unnamed>::|\(anonymous namespace\)::", "", name)
     m = re.search(r"(\w+)\s*(?:<[^()]*>)?\s*\(", name)
     return (m.group(1) if m else name)[:60]
 
@@ -41,7 +42,9 @@ def main():
     ), phases AS (
       SELECT n.start, n.end, n.globalTid, COALESCE(n.text, s.value) AS phase FROM NVTX_EVENTS n
       LEFT JOIN StringIds s ON s.id = n.textId
-      WHERE COALESCE(n.text, s.value) IN ('forward', 'backward')
+      -- phases are our own ranges; PyTorch's cub calls push nested 'cub::...' ranges of their own
+      WHERE COALESCE(n.text, s.value) NOT LIKE 'step/%' AND COALESCE(n.text, s.value) NOT LIKE 'cub::%'
+        AND n.end IS NOT NULL
     )
     SELECT ks.value AS kname, ph.phase, k.end - k.start AS dur
     FROM CUPTI_ACTIVITY_KIND_KERNEL k
@@ -61,6 +64,14 @@ def main():
         agg[key] = (t + dur, c + 1)
     total = sum(t for t, _ in agg.values())
     print(f"{n_steps} steps, total GPU kernel time per step: {total / n_steps / 1e6:.3f} ms\n")
+    by_phase = {}
+    for (_, ph), (t, c) in agg.items():
+        pt, pc = by_phase.get(ph, (0, 0))
+        by_phase[ph] = (pt + t, pc + c)
+    print("| phase | ms/step | % | launches/step |\n|---|---|---|---|")
+    for ph, (t, c) in sorted(by_phase.items(), key=lambda kv: -kv[1][0]):
+        print(f"| {ph} | {t / n_steps / 1e6:.3f} | {100 * t / total:.1f} | {c / n_steps:g} |")
+    print()
     print(f"| kernel | phase | ms/step | % | launches/step |\n|---|---|---|---|---|")
     for (k, ph), (t, c) in sorted(agg.items(), key=lambda kv: -kv[1][0])[: a.top]:
         print(f"| `{k}` | {ph} | {t / n_steps / 1e6:.3f} | {100 * t / total:.1f} | {c / n_steps:g} |")
