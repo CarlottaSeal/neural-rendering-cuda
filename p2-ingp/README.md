@@ -12,6 +12,9 @@ a pure-PyTorch reference and against gradcheck before it is optimized.
 | `ingp/render.py` | 128³ occupancy grid, packed ray marching (dt = √3·3/1024), packed volume rendering with fp64 cumsum |
 | `ingp/data.py` | NeRF-synthetic loader; images stay on the GPU as uint8 |
 | `csrc/hash_encoding.cu` | CUDA hash encoding v0: one thread per (point, level), backward with float `atomicAdd` |
+| `csrc/march.cu` | CUDA ray marching v0: one thread per ray, count → scan → write packed samples; same rounding as the reference |
+| `csrc/bindings.cpp` | pybind module for the kernels |
+| `tests/test_march.py` | CUDA march vs reference (bitwise), plus timing |
 | `train_ref.py` | training loop: Adam 1e-2 (eps 1e-15), 100-step warm-up, ×0.33 at 50/75/90 %, about 2^18 samples per step, random background |
 | `tests/test_ref.py` | reference vs naive loops + gradcheck |
 | `tests/test_cuda.py` | CUDA kernel vs reference, plus timing |
@@ -73,6 +76,37 @@ AABB, which is 27.5 M candidates per step (562 per ray on average), and keeps th
 It also runs in 4 chunks of 2^23, each with `.item()` syncs. The two MLPs take 1.5 ms together, so a fused MLP can
 save at most that much. In the prune phase, 5.0 ms of the 7.3 ms is the hash forward on 1.1 M points.
 
+**CUDA ray marching v0** (`tests/test_march.py`). Pass 1 counts the samples that land in occupied cells for each
+ray. A cumsum gives the offsets, and its last element is the only host sync. Pass 2 repeats the steps and writes
+packed (ray, t). Each float op uses an explicit rounding intrinsic (`__fmul_rn`, `__fadd_rn`, …) in the
+reference's order, and the scalar division by dt is a multiply by the reciprocal, as torch does it. The jitter
+comes from the same RNG call. So the output is compared with `torch.equal`, not a tolerance:
+
+- random 30 % occupancy, 4096 rays (axis-parallel, starting inside the box, missing it), with and without jitter: equal
+- Lego rays (48,872) against the trained grid (3.5 % occupied), 1.12 M samples: equal
+
+| march, 48,872 rays | ms |
+|---|---|
+| PyTorch reference | 21.937 |
+| CUDA v0 | 0.837 (26.2×) |
+
+The full step with CUDA encoding and CUDA march takes 20.3 ms (49.2 it/s). The march phase is now 0.9 ms, and
+the largest phases are prune (7.8 ms) and backward (6.1 ms).
+
+**Lego, 30k iterations, seed 0, CUDA encoding + CUDA march** (same settings as the reference run):
+
+| run | test PSNR (200 images) | train time | it/s | peak memory |
+|---|---|---|---|---|
+| PyTorch reference | 35.04 dB | 4226 s | 7.1 | 7786 MiB |
+| CUDA encoding + march | 35.00 dB | 596 s | 50.4 | 4449 MiB |
+
+This is one seed per run. The CUDA backward accumulates with float atomics, so runs are not bitwise
+reproducible; the 0.04 dB gap is within the seed-to-seed spread seen in P1. The quick test PSNR (every 20th
+image) at 5k / 10k / 20k / 30k is 34.05 / 34.57 / 35.40 / 35.50 dB, against 34.24 / 34.65 / 35.44 / 35.54 for
+the reference. The train time ratio (7.1×) compares against the reference run, which had a game open. The
+clean steady-state ratio is 148.5 / 20.3 = 7.3× per step. The 30k-in-under-20-minutes target is met (9.9 min).
+The memory peak drops because the march no longer materialises every candidate.
+
 ## History
 
 - The first 30k run ran out of memory at iteration ~2500. `march` materialised [rays × 1024] candidates,
@@ -81,6 +115,7 @@ save at most that much. In the prune phase, 5.0 ms of the 7.3 ms is the hash for
 
 ## Next
 
-1. CUDA ray marching: one thread per ray, skip empty cells, count then scan then write packed samples.
-2. Full training run with the CUDA encoding (PSNR unchanged, end-to-end time).
-3. Prune cost (hash forward on all candidates), then compositing; the fused MLP moves down the list.
+1. Profile the new step at kernel level. Prune (hash forward on 1.1 M candidates) and backward are the top phases.
+2. Fused compositing / transmittance kernels, forward and backward.
+3. Faster hash encoding (the v0 layout is one thread per point and level), then the fused MLP.
+4. Comparison with tiny-cuda-nn.

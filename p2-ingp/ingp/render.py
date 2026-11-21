@@ -22,6 +22,7 @@ class OccupancyGrid:
 
     def __init__(self, aabb, res=128, decay=0.95, thresh=0.01, device="cuda"):
         self.aabb, self.res, self.decay, self.thresh = aabb, res, decay, thresh
+        self.aabb_host = aabb.tolist()  # for kernel arguments, without a device sync per call
         self.density = torch.zeros(res ** 3, device=device)
         self.occ = torch.ones(res ** 3, dtype=torch.bool, device=device)  # everything occupied until the first update
         g = torch.arange(res, device=device)
@@ -49,12 +50,19 @@ class OccupancyGrid:
         return self.occ.float().mean().item()
 
 
-def march(o, d, aabb, grid, dt, jitter, max_candidates=1 << 23):
+def march(o, d, aabb, grid, dt, jitter, max_candidates=1 << 23, backend="torch"):
     """Uniform steps of dt inside the AABB, keeping samples in occupied cells. Returns packed (ray_idx, t).
 
     Candidates are generated packed (only inside [tmin, tmax] of each ray) and in ray chunks of at most
     max_candidates, so memory stays bounded however many rays the batch has.
+    backend="cuda" runs csrc/march.cu, which draws the same jitter and returns the same samples.
     """
+    if backend == "cuda":
+        from .cuda_ext import ext
+        n = o.shape[0]
+        u = torch.rand(n, device=o.device) if jitter else torch.full((n,), 0.5, device=o.device)
+        return tuple(ext().march_rays(o.contiguous(), d.contiguous(), u, grid.occ.contiguous(),
+                                      grid.aabb_host, grid.res, dt))  # the grid's AABB is the field's
     tmin, tmax = ray_aabb(o, d, aabb)
     u = torch.rand_like(tmin) if jitter else torch.full_like(tmin, 0.5)
     # t_k = tmin + (k + u) dt < tmax  <=>  k < (tmax - tmin)/dt - u
@@ -102,10 +110,10 @@ def composite(sigma, rgb, dt, ray_idx, n_rays):
     return color, acc
 
 
-def render_rays(field, grid, o, d, dt, bg, jitter=False, t_thresh=1e-4):
+def render_rays(field, grid, o, d, dt, bg, jitter=False, t_thresh=1e-4, march_backend="torch"):
     """Two passes: (1) density only, no grad, to find samples after T < t_thresh; (2) full field on the rest."""
     n_rays = o.shape[0]
-    ray_idx, t = march(o, d, field.aabb, grid, dt, jitter)
+    ray_idx, t = march(o, d, field.aabb, grid, dt, jitter, backend=march_backend)
     n_marched = ray_idx.numel()
     if n_marched:
         with torch.no_grad():

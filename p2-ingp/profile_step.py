@@ -52,7 +52,7 @@ class Phases:
             torch.cuda.nvtx.range_pop()
 
 
-def step(field, grid, scene, opt, n_rays, dt, ph, do_grid, t_thresh=1e-4):
+def step(field, grid, scene, opt, n_rays, dt, ph, do_grid, march_backend, t_thresh=1e-4):
     """One training step, same math as train_ref.py + render.render_rays, with the field forward split up."""
     if do_grid:
         with ph("grid_update"):
@@ -62,7 +62,7 @@ def step(field, grid, scene, opt, n_rays, dt, ph, do_grid, t_thresh=1e-4):
         bg = torch.rand(n_rays, 3, device=o.device)
         gt = rgba[:, :3] * rgba[:, 3:] + bg * (1 - rgba[:, 3:])
     with ph("march"):
-        ray_idx, t = march(o, d, field.aabb, grid, dt, jitter=True)
+        ray_idx, t = march(o, d, field.aabb, grid, dt, jitter=True, backend=march_backend)
         n_marched = ray_idx.numel()
     with ph("prune"):
         with torch.no_grad():
@@ -95,6 +95,7 @@ def main():
     ap.add_argument("--data", default="data/nerf_synthetic/lego")
     ap.add_argument("--ckpt", default="outputs/p2/ref_lego/field.pt")
     ap.add_argument("--backend", default="torch", choices=["torch", "cuda"], help="hash encoding backend")
+    ap.add_argument("--march", default="torch", choices=["torch", "cuda"], help="ray marching backend")
     ap.add_argument("--target_samples", type=int, default=1 << 18)
     ap.add_argument("--grid_every", type=int, default=16)
     ap.add_argument("--adapt_steps", type=int, default=60)
@@ -130,7 +131,7 @@ def main():
             it += 1
             if mode == "nvtx":
                 torch.cuda.nvtx.range_push(f"step/{i}")
-            m, s = step(field, grid, scene, opt, n_rays, dt, ph, it % args.grid_every == 0)
+            m, s = step(field, grid, scene, opt, n_rays, dt, ph, it % args.grid_every == 0, args.march)
             if mode == "nvtx":
                 torch.cuda.nvtx.range_pop()
             marched, samples = marched + m, samples + s
@@ -140,7 +141,7 @@ def main():
 
     run(args.adapt_steps, None)
     it = 0  # so each measured run sees the same grid-update phase
-    res = {"backend": args.backend, "steps": args.steps, "rays": n_rays, "occupancy": grid.occupancy}
+    res = {"backend": args.backend, "march": args.march, "steps": args.steps, "rays": n_rays, "occupancy": grid.occupancy}
     if not args.nvtx_only:
         torch.cuda.synchronize()
         t0 = time.perf_counter()

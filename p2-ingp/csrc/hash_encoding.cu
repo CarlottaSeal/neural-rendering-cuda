@@ -128,8 +128,3 @@ torch::Tensor hash_encode_bwd(torch::Tensor x, torch::Tensor grad_out, torch::Te
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return grad_table;
 }
-
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("hash_encode_fwd", &hash_encode_fwd);
-  m.def("hash_encode_bwd", &hash_encode_bwd);
-}

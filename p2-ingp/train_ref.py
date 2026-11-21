@@ -22,14 +22,14 @@ def psnr(mse):
 
 
 @torch.no_grad()
-def evaluate(field, grid, scene, dt, stride=1, chunk=1 << 14, save_dir=None):
+def evaluate(field, grid, scene, dt, stride=1, chunk=1 << 14, save_dir=None, march_backend="torch"):
     field.eval()
     white = torch.ones(3, device=scene.device)
     psnrs = []
     for i in range(0, scene.n, stride):
         o, d, rgba = scene.image_rays(i)
         gt = rgba[:, :3] * rgba[:, 3:] + (1 - rgba[:, 3:])
-        out = torch.cat([render_rays(field, grid, oc, dc, dt, white)[0] for oc, dc in zip(o.split(chunk), d.split(chunk))])
+        out = torch.cat([render_rays(field, grid, oc, dc, dt, white, march_backend=march_backend)[0] for oc, dc in zip(o.split(chunk), d.split(chunk))])
         psnrs.append(psnr(((out.clamp(0, 1) - gt) ** 2).mean().item()))
         if save_dir is not None and i == 0:
             import cv2
@@ -53,6 +53,8 @@ def main():
     ap.add_argument("--test_stride", type=int, default=1, help="evaluate every k-th test image")
     ap.add_argument("--eval_every", type=int, default=0, help="quick eval (stride 20) every k iters; 0 = off")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--encoding", default="torch", choices=["torch", "cuda"], help="hash encoding backend")
+    ap.add_argument("--march", default="torch", choices=["torch", "cuda"], help="ray marching backend")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -64,6 +66,7 @@ def main():
     train = BlenderScene(args.data, "train", dev)
     test = BlenderScene(args.data, "test", dev)
     field = NGPField(aabb, log2_table=args.log2_table).to(dev)
+    field.encoding.backend = args.encoding
     grid = OccupancyGrid(aabb, device=dev)
 
     opt = torch.optim.Adam([
@@ -85,7 +88,7 @@ def main():
         o, d, rgba = train.sample_batch(n_rays)
         bg = torch.rand(n_rays, 3, device=dev)  # random background so the model cannot paint it into the volume
         gt = rgba[:, :3] * rgba[:, 3:] + bg * (1 - rgba[:, 3:])
-        color, _, stats = render_rays(field, grid, o, d, dt, bg, jitter=True)
+        color, _, stats = render_rays(field, grid, o, d, dt, bg, jitter=True, march_backend=args.march)
         loss = torch.nn.functional.mse_loss(color, gt)
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -103,7 +106,7 @@ def main():
         if args.eval_every and it % args.eval_every == 0:
             torch.cuda.synchronize()
             t_train += time.perf_counter() - t0
-            p, _ = evaluate(field, grid, test, dt, stride=20)
+            p, _ = evaluate(field, grid, test, dt, stride=20, march_backend=args.march)
             print(json.dumps({"iter": it, "quick_test_psnr": p}), flush=True)
             torch.cuda.synchronize()
             t0 = time.perf_counter()
@@ -112,7 +115,7 @@ def main():
     peak = torch.cuda.max_memory_allocated() / 2 ** 20
 
     t1 = time.perf_counter()
-    p, ps = evaluate(field, grid, test, dt, stride=args.test_stride, save_dir=args.out)
+    p, ps = evaluate(field, grid, test, dt, stride=args.test_stride, save_dir=args.out, march_backend=args.march)
     t_eval = time.perf_counter() - t1
     res = {"iters": args.iters, "train_s": t_train, "it_per_s": args.iters / t_train, "test_psnr": p,
            "n_test": len(ps), "eval_s": t_eval, "peak_mem_mib": peak, "args": vars(args), "log": log}

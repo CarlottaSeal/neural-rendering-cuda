@@ -17,7 +17,7 @@ def ext():
     if _ext is None:
         _ext = load(
             name="ingp_cuda",
-            sources=[os.path.join(_SRC, "hash_encoding.cu")],
+            sources=[os.path.join(_SRC, f) for f in ("bindings.cpp", "hash_encoding.cu", "march.cu")],
             extra_cuda_cflags=["-O3", "-lineinfo", "--use_fast_math"],
             verbose=False,
         )
