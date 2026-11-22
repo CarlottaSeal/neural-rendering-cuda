@@ -58,6 +58,7 @@ def main():
     ap.add_argument("--fused_mlp", action="store_true", help="csrc/mlp.cu for the no-grad sigma queries")
     ap.add_argument("--fused_adam", action="store_true", help="torch.optim.Adam(fused=True)")
     ap.add_argument("--fused_train_mlp", action="store_true", help="csrc/mlp_train.cu for the field forward and backward")
+    ap.add_argument("--mlp_version", type=int, default=0, help="fused training MLP: 0 fp32 SIMT, 1 TF32 WMMA")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -72,6 +73,7 @@ def main():
     field.encoding.backend = args.encoding
     field.fused_mlp = args.fused_mlp
     field.fused_train_mlp = args.fused_train_mlp
+    field.mlp_version = args.mlp_version
     grid = OccupancyGrid(aabb, device=dev)
 
     opt = torch.optim.Adam([

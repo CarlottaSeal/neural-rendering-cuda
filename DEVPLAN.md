@@ -25,7 +25,9 @@ Pipeline: preprocess (EWA projection to 2D) → tile binning (16×16) → CUB ra
   so the < 20 min target is met. Hash encoding v1 (coalesced, paired loads, vector atomics): 35.06 dB in 440 s
   (68.1 it/s). Fused no-grad density MLP + Adam(fused=True): 35.04 dB in 340 s (88.2 it/s). Fused training
   MLP (fp32 SIMT, fwd/bwd/weight grads): 35.13 dB in 256 s (117.0 it/s). Next: cut the MLP's activation
-  traffic, then WMMA and compositing kernels
+  traffic, then WMMA and compositing kernels. TF32 WMMA version done: the MLP is 12 % faster (fwd+bwd 2.20 → 1.93 ms) but
+  the step is not (bandwidth-bound, and the GeForce TF32 rate is about the fp32 rate), 35.10 dB; fp32 stays the default.
+  Next: fp16 storage/math for the MLP, or the prune-pass and compositing fusions
 - Multi-resolution hash encoding, forward and backward (backward uses atomicAdd)
 - Fused MLP with Tensor Core WMMA, 64-wide layers
 - Volume rendering, forward and backward

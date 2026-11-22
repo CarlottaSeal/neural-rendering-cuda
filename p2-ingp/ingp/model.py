@@ -37,6 +37,7 @@ class NGPField(nn.Module):
         self.color_net = mlp(15 + 16, width, 2, 3)
         self.fused_mlp = False  # csrc/mlp.cu for no-grad sigma queries (prune pass, occupancy update)
         self.fused_train_mlp = False  # csrc/mlp_train.cu for the full field, forward and backward
+        self.mlp_version = 0  # 0: fp32 SIMT, 1: TF32 WMMA (no end-to-end gain on this GPU)
 
     def normalize(self, x):
         lo, hi = self.aabb[:3], self.aabb[3:]
@@ -58,7 +59,7 @@ class NGPField(nn.Module):
     def forward(self, x, d):
         if self.fused_train_mlp:
             from .cuda_ext import FusedMLPFn
-            return FusedMLPFn.apply(self.encoding(self.normalize(x)), d, *self.weights())
+            return FusedMLPFn.apply(self.encoding(self.normalize(x)), d, self.mlp_version, *self.weights())
         sigma, feat = self.density(x, return_feat=True)
         rgb = torch.sigmoid(self.color_net(torch.cat([feat, sh_encoding_deg4(d)], -1)))
         return sigma, rgb

@@ -14,8 +14,8 @@ a pure-PyTorch reference and against gradcheck before it is optimized.
 | `csrc/hash_encoding.cu` | CUDA hash encoding. v0: one thread per (point, level), level-major grid, scalar `atomicAdd`. v1 (default): level-fastest threads, paired x-corner loads, vector atomics |
 | `csrc/march.cu` | CUDA ray marching v0: one thread per ray, count → scan → write packed samples; same rounding as the reference |
 | `csrc/mlp.cu` | fused no-grad density MLP for the prune pass and the occupancy update: sigma only, weights in `__constant__` memory |
-| `csrc/mlp_train.cu` | fused training MLP (density + color, fwd/bwd/weight grads), fp32 SIMT with shared-memory weights |
-| `tests/test_mlp_train.py` | fused training MLP vs autograd (both against fp64), plus timing |
+| `csrc/mlp_train.cu` | fused training MLP (density + color, fwd/bwd/weight grads): fp32 SIMT (default) and TF32 WMMA |
+| `tests/test_mlp_train.py` | fused training MLP vs autograd (both against fp64), TF32 version vs an fp64 TF32 emulation, timing |
 | `csrc/bindings.cpp` | pybind module for the kernels |
 | `tests/test_march.py` | CUDA march vs reference (bitwise), plus timing |
 | `tests/test_mlp.py` | fused density MLP vs the density net: sigma error, prune decisions, timing |
@@ -198,6 +198,43 @@ gradients, so they are bound by memory bandwidth, not by math.
 Lego 30k: 35.13 dB in 256 s (117.0 it/s). The peak memory goes from 4449 to 5494 MiB. That is the saved
 [N, 240] activations plus the [N, 212] gradient buffer, along with what the early large-batch steps keep alive.
 
+**TF32 tensor cores (`--mlp_version 1`, measured, not the default).** nsys put the three MLP kernels at 2.18 ms
+of the step's 6.93 GPU ms, so `mlp_train.cu` got a WMMA version of the forward and the backward
+(`tc::mlp_fwd` / `tc::mlp_bwd`; `mlp_wgrad` is shared).
+
+- Each warp takes a 16-point tile and computes every layer in place in its own 16×68 shared-memory buffer.
+  The weights sit in shared memory as row-major [out][in + 4]. The forward reads them as col-major B, for
+  X·Wᵀ; the backward reads the same arrays as row-major B, for G·W.
+- The blocks are persistent (8 warps each), so each block loads the weights once.
+- The ReLU masks come from the saved activations, loaded as accumulator fragments, so their element layout
+  matches the gradient fragments.
+- MMA operands are rounded to TF32, and every sum is fp32.
+
+Checking it against fp64 is not enough, because TF32 keeps only 10 mantissa bits. The color net's inputs include
+density features of magnitude up to ~10³, and its pre-activations cancel, so ReLU decisions flip. The relative
+L2 error against fp64 is 2.5e-4 for rgb, about 2e-3 for d(enc) and dWd1, and 1–2e-2 for dWc1 and dWc2. The test
+therefore also runs an fp64 emulation that rounds to TF32 at the same points as the kernels. The kernels match
+it to 1e-5–1e-4 (6e-4 for dWc1), which is 20–300× closer than to plain fp64. On 16,005 points (a partial last
+tile) they match to about 2e-5.
+
+| 262k points | torch | fp32 SIMT | TF32 WMMA |
+|---|---|---|---|
+| no-grad forward | 1.76 ms | 0.46 ms | 0.32 ms |
+| fwd + bwd | 5.19 ms | 2.20 ms | 1.93 ms |
+
+The whole step does not get faster: 8.95 ms with SIMT against 8.90 ms with WMMA, which is within run-to-run
+noise. Two limits explain why:
+
+- The no-grad forward does 80 16×16×8 MMAs per 16 points, 10.7 GFLOP for 262k points, in 0.32 ms. That is
+  33 TFLOPS. On GeForce parts the TF32 tensor rate is about the fp32 SIMT rate, so this is not much
+  headroom over SIMT.
+- With activations saved, the forward, the backward and `mlp_wgrad` each move 250–500 MB at 620–670 GB/s,
+  about 70 % of the 896 GB/s peak. Faster math does not shorten them.
+
+A variant that reads the weights from a padded global copy instead of shared memory (more blocks per SM) was
+no faster, so it was dropped. Lego 30k with TF32 trains normally: 35.10 dB in 270 s (111.2 it/s), against 35.13 dB
+in 256 s for fp32 SIMT (one seed each).
+
 ## History
 
 - The first 30k run ran out of memory at iteration ~2500. `march` materialised [rays × 1024] candidates,
@@ -206,9 +243,10 @@ Lego 30k: 35.13 dB in 256 s (117.0 it/s). The peak memory goes from 4449 to 5494
 
 ## Next
 
-1. Cut the fused MLP's memory traffic: recompute activations in the backward instead of saving them, and
-   reduce the weight gradients inside `mlp_bwd`, so the [N, 212] buffer is never written. WMMA for the layers
-   comes after that, because the kernels are bandwidth-bound now.
+1. FP16 for the MLP, as tiny-cuda-nn does: fp16 storage for the saved activations halves the traffic that bounds
+   all three kernels. GeForce parts are specified at twice the TF32 rate for fp16 with fp32 accumulation (not
+   measured here). The backward
+   needs a loss scale, or bf16, for gradients that are below fp16's range.
 2. Fuse the hash forward into the prune pass so the [1.1 M, 32] encoding is never written.
 3. Fused compositing / transmittance kernels.
 4. Comparison with tiny-cuda-nn.

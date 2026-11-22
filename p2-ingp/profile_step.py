@@ -76,7 +76,7 @@ def step(field, grid, scene, opt, n_rays, dt, ph, do_grid, march_backend, t_thre
         enc = field.encoding(field.normalize(pts))
     if field.fused_train_mlp:
         with ph("density_mlp"):  # density and color in one kernel
-            sigma, rgb = FusedMLPFn.apply(enc, d[ray_idx], *field.weights())
+            sigma, rgb = FusedMLPFn.apply(enc, d[ray_idx], field.mlp_version, *field.weights())
     else:
         with ph("density_mlp"):
             h = field.density_net(enc)
@@ -104,6 +104,7 @@ def main():
     ap.add_argument("--fused_mlp", action="store_true", help="csrc/mlp.cu for the no-grad sigma queries")
     ap.add_argument("--fused_adam", action="store_true", help="torch.optim.Adam(fused=True)")
     ap.add_argument("--fused_train_mlp", action="store_true", help="csrc/mlp_train.cu for the field forward and backward")
+    ap.add_argument("--mlp_version", type=int, default=0, help="fused training MLP: 0 fp32 SIMT, 1 TF32 WMMA")
     ap.add_argument("--target_samples", type=int, default=1 << 18)
     ap.add_argument("--grid_every", type=int, default=16)
     ap.add_argument("--adapt_steps", type=int, default=60)
@@ -122,6 +123,7 @@ def main():
     field.encoding.backend = args.backend
     field.fused_mlp = args.fused_mlp
     field.fused_train_mlp = args.fused_train_mlp
+    field.mlp_version = args.mlp_version
     grid = OccupancyGrid(aabb, device=dev)
     for _ in range(30):  # running max with decay 0.95 settles in a few dozen updates
         grid.update(lambda p: field.density(p), dt)
@@ -151,7 +153,7 @@ def main():
 
     run(args.adapt_steps, None)
     it = 0  # so each measured run sees the same grid-update phase
-    res = {"backend": args.backend, "march": args.march, "fused_mlp": args.fused_mlp, "fused_adam": args.fused_adam, "fused_train_mlp": args.fused_train_mlp, "steps": args.steps, "rays": n_rays, "occupancy": grid.occupancy}
+    res = {"backend": args.backend, "march": args.march, "fused_mlp": args.fused_mlp, "fused_adam": args.fused_adam, "fused_train_mlp": args.fused_train_mlp, "mlp_version": args.mlp_version, "steps": args.steps, "rays": n_rays, "occupancy": grid.occupancy}
     if not args.nvtx_only:
         torch.cuda.synchronize()
         t0 = time.perf_counter()
