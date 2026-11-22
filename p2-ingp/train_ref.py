@@ -55,6 +55,8 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--encoding", default="torch", choices=["torch", "cuda"], help="hash encoding backend")
     ap.add_argument("--march", default="torch", choices=["torch", "cuda"], help="ray marching backend")
+    ap.add_argument("--fused_mlp", action="store_true", help="csrc/mlp.cu for the no-grad sigma queries")
+    ap.add_argument("--fused_adam", action="store_true", help="torch.optim.Adam(fused=True)")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -67,12 +69,13 @@ def main():
     test = BlenderScene(args.data, "test", dev)
     field = NGPField(aabb, log2_table=args.log2_table).to(dev)
     field.encoding.backend = args.encoding
+    field.fused_mlp = args.fused_mlp
     grid = OccupancyGrid(aabb, device=dev)
 
     opt = torch.optim.Adam([
         {"params": field.encoding.parameters(), "weight_decay": 0.0},
         {"params": list(field.density_net.parameters()) + list(field.color_net.parameters()), "weight_decay": 1e-6},
-    ], lr=args.lr, betas=(0.9, 0.99), eps=1e-15)
+    ], lr=args.lr, betas=(0.9, 0.99), eps=1e-15, fused=args.fused_adam)
     sched = torch.optim.lr_scheduler.SequentialLR(opt, [
         torch.optim.lr_scheduler.LinearLR(opt, start_factor=0.01, total_iters=100),
         torch.optim.lr_scheduler.MultiStepLR(opt, milestones=[args.iters // 2, args.iters * 3 // 4, args.iters * 9 // 10], gamma=0.33),

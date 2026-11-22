@@ -13,8 +13,10 @@ a pure-PyTorch reference and against gradcheck before it is optimized.
 | `ingp/data.py` | NeRF-synthetic loader; images stay on the GPU as uint8 |
 | `csrc/hash_encoding.cu` | CUDA hash encoding. v0: one thread per (point, level), level-major grid, scalar `atomicAdd`. v1 (default): level-fastest threads, paired x-corner loads, vector atomics |
 | `csrc/march.cu` | CUDA ray marching v0: one thread per ray, count → scan → write packed samples; same rounding as the reference |
+| `csrc/mlp.cu` | fused no-grad density MLP for the prune pass and the occupancy update: sigma only, weights in `__constant__` memory |
 | `csrc/bindings.cpp` | pybind module for the kernels |
 | `tests/test_march.py` | CUDA march vs reference (bitwise), plus timing |
+| `tests/test_mlp.py` | fused density MLP vs the density net: sigma error, prune decisions, timing |
 | `train_ref.py` | training loop: Adam 1e-2 (eps 1e-15), 100-step warm-up, ×0.33 at 50/75/90 %, about 2^18 samples per step, random background |
 | `tests/test_ref.py` | reference vs naive loops + gradcheck |
 | `tests/test_cuda.py` | CUDA kernel vs reference, plus timing |
@@ -137,6 +139,28 @@ there. With v1, the full step takes 14.5 ms (68.8 it/s): prune drops from 7.8 to
 
 The quick test PSNR for v1 at 5k / 10k / 20k / 30k is 34.21 / 34.69 / 35.38 / 35.48 dB.
 
+**Fused no-grad density MLP and fused Adam.** With hash v1 the GPU time is 12.0 ms per step, and nsys
+attributes about 6.3 ms of it to the two MLPs: the GEMMs, the ReLU write-backs (`clamp`/`threshold`) and
+cuBLAS's `Kernel2`. The prune pass and the occupancy update need only sigma and no gradient, but the
+reference runs the whole 32→64→16 net and writes a [1.1 M, 64] hidden tensor. `csrc/mlp.cu` computes
+sigma = exp(relu(enc·W1ᵀ)·W2[0]) with one thread per point. The weights sit in `__constant__` memory, copied
+device to device on the compute stream before each launch. All threads read the same weight, so the constant
+cache broadcasts it, and the unrolled FFMAs take it as an operand. On the 1.12 M Lego prune points the max
+relative sigma error is 9.1e-7. One of the 1.12 M keep/drop decisions differs (265,164 kept against
+265,163). The density MLP goes from 1.828 ms to 0.218 ms.
+
+The optimizer is the other large item: 1.9 ms for 16.8 M parameters with the default foreach Adam.
+`torch.optim.Adam(fused=True)` is PyTorch's own fused kernel, not one written here.
+
+| step (CUDA march + hash v1) | wall ms/step | it/s | prune | optimizer |
+|---|---|---|---|---|
+| baseline | 14.48 | 69.1 | 3.72 | 1.88 |
+| + fused density MLP (`--fused_mlp`) | 12.57 | 79.6 | 2.06 | 1.86 |
+| + `Adam(fused=True)` (`--fused_adam`) | 11.47 | 87.1 | 2.01 | 0.75 |
+
+Lego 30k with both: 35.04 dB in 340 s (88.2 it/s). The quick test PSNR at 5k / 10k / 20k / 30k is 34.24 /
+34.74 / 35.39 / 35.53 dB.
+
 ## History
 
 - The first 30k run ran out of memory at iteration ~2500. `march` materialised [rays × 1024] candidates,
@@ -145,8 +169,8 @@ The quick test PSNR for v1 at 5k / 10k / 20k / 30k is 34.21 / 34.69 / 35.38 / 35
 
 ## Next
 
-1. Profile the v1 step at kernel level. Backward (5.0 ms) and prune (3.7 ms) are the top phases; the MLPs'
-   ReLU write-backs and small GEMMs are spread across both.
-2. Fused MLP (density and color), forward and backward.
+1. Fused training MLP (density and color), forward and backward. The backward phase (4.9 ms) is now the
+   largest, and most of it is the MLPs' GEMMs and ReLU masks.
+2. Fuse the hash forward into the prune pass so the [1.1 M, 32] encoding is never written.
 3. Fused compositing / transmittance kernels.
 4. Comparison with tiny-cuda-nn.

@@ -96,6 +96,8 @@ def main():
     ap.add_argument("--ckpt", default="outputs/p2/ref_lego/field.pt")
     ap.add_argument("--backend", default="torch", choices=["torch", "cuda"], help="hash encoding backend")
     ap.add_argument("--march", default="torch", choices=["torch", "cuda"], help="ray marching backend")
+    ap.add_argument("--fused_mlp", action="store_true", help="csrc/mlp.cu for the no-grad sigma queries")
+    ap.add_argument("--fused_adam", action="store_true", help="torch.optim.Adam(fused=True)")
     ap.add_argument("--target_samples", type=int, default=1 << 18)
     ap.add_argument("--grid_every", type=int, default=16)
     ap.add_argument("--adapt_steps", type=int, default=60)
@@ -112,6 +114,7 @@ def main():
     field = NGPField(aabb).to(dev)
     field.load_state_dict(torch.load(args.ckpt, map_location=dev))
     field.encoding.backend = args.backend
+    field.fused_mlp = args.fused_mlp
     grid = OccupancyGrid(aabb, device=dev)
     for _ in range(30):  # running max with decay 0.95 settles in a few dozen updates
         grid.update(lambda p: field.density(p), dt)
@@ -119,7 +122,7 @@ def main():
     opt = torch.optim.Adam([
         {"params": field.encoding.parameters(), "weight_decay": 0.0},
         {"params": list(field.density_net.parameters()) + list(field.color_net.parameters()), "weight_decay": 1e-6},
-    ], lr=lr_end, betas=(0.9, 0.99), eps=1e-15)
+    ], lr=lr_end, betas=(0.9, 0.99), eps=1e-15, fused=args.fused_adam)
 
     n_rays, it = 4096, 0
 
@@ -141,7 +144,7 @@ def main():
 
     run(args.adapt_steps, None)
     it = 0  # so each measured run sees the same grid-update phase
-    res = {"backend": args.backend, "march": args.march, "steps": args.steps, "rays": n_rays, "occupancy": grid.occupancy}
+    res = {"backend": args.backend, "march": args.march, "fused_mlp": args.fused_mlp, "fused_adam": args.fused_adam, "steps": args.steps, "rays": n_rays, "occupancy": grid.occupancy}
     if not args.nvtx_only:
         torch.cuda.synchronize()
         t0 = time.perf_counter()

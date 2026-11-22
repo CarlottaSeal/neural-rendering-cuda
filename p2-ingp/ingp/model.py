@@ -35,12 +35,17 @@ class NGPField(nn.Module):
         self.encoding = HashEncoding(n_levels, n_features, log2_table, n_min, n_max)
         self.density_net = mlp(self.encoding.out_dim, width, 1, 16)
         self.color_net = mlp(15 + 16, width, 2, 3)
+        self.fused_mlp = False  # csrc/mlp.cu for no-grad sigma queries (prune pass, occupancy update)
 
     def normalize(self, x):
         lo, hi = self.aabb[:3], self.aabb[3:]
         return (x - lo) / (hi - lo)
 
     def density(self, x, return_feat=False):
+        if self.fused_mlp and not return_feat and not torch.is_grad_enabled():
+            from .cuda_ext import ext
+            enc = self.encoding(self.normalize(x))
+            return ext().density_mlp_fwd(enc.contiguous(), self.density_net[0].weight, self.density_net[2].weight)
         h = self.density_net(self.encoding(self.normalize(x)))
         sigma = TruncExp.apply(h[:, 0])
         return (sigma, h[:, 1:]) if return_feat else sigma
