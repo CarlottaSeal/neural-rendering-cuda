@@ -14,6 +14,8 @@ a pure-PyTorch reference and against gradcheck before it is optimized.
 | `csrc/hash_encoding.cu` | CUDA hash encoding. v0: one thread per (point, level), level-major grid, scalar `atomicAdd`. v1 (default): level-fastest threads, paired x-corner loads, vector atomics |
 | `csrc/march.cu` | CUDA ray marching v0: one thread per ray, count → scan → write packed samples; same rounding as the reference |
 | `csrc/mlp.cu` | fused no-grad density MLP for the prune pass and the occupancy update: sigma only, weights in `__constant__` memory |
+| `csrc/mlp_train.cu` | fused training MLP (density + color, fwd/bwd/weight grads), fp32 SIMT with shared-memory weights |
+| `tests/test_mlp_train.py` | fused training MLP vs autograd (both against fp64), plus timing |
 | `csrc/bindings.cpp` | pybind module for the kernels |
 | `tests/test_march.py` | CUDA march vs reference (bitwise), plus timing |
 | `tests/test_mlp.py` | fused density MLP vs the density net: sigma error, prune decisions, timing |
@@ -161,6 +163,41 @@ The optimizer is the other large item: 1.9 ms for 16.8 M parameters with the def
 Lego 30k with both: 35.04 dB in 340 s (88.2 it/s). The quick test PSNR at 5k / 10k / 20k / 30k is 34.24 /
 34.74 / 35.39 / 35.53 dB.
 
+**Fused training MLP** (`csrc/mlp_train.cu`, `--fused_train_mlp`). It replaces the density net, the
+feature/SH concat, the color net and the sigmoid, forward and backward, with three fp32 SIMT kernels.
+
+- `mlp_fwd` runs one thread per point. All five weight matrices (37.9 KB) sit in shared memory, and every
+  thread reads the same weight at the same time, so each read is a broadcast. SH is computed in the kernel.
+  For the backward, it saves each layer's input (240 floats per point).
+- `mlp_bwd` also runs one thread per point. It goes back through the layers with the ReLU masks, writes
+  d(enc), and writes each layer's output gradient (212 floats per point).
+- `mlp_wgrad` computes dW = Σ Gᵀ X for all five layers in one launch (`blockIdx.y` = layer). Each block
+  takes 2048 points, stages 32-point tiles in shared memory, accumulates a 4×4 register tile per thread,
+  and adds it to dW with one atomic per element per block.
+
+`tests/test_mlp_train.py` runs 262k Lego points from the trained field with random directions and upstream
+gradients. It compares both the fp32 autograd path and the fused kernels against fp64. The error is the max
+error over the max |fp64 value|:
+
+| | sigma | rgb | d enc | dWd1 | dWd2 | dWc1 | dWc2 | dWc3 |
+|---|---|---|---|---|---|---|---|---|
+| torch fp32 | 4.5e-7 | 8.4e-7 | 8.0e-7 | 5.9e-7 | 3.2e-7 | 6.4e-4 | 1.9e-3 | 8.1e-7 |
+| fused | 6.3e-7 | 8.4e-7 | 1.2e-6 | 1.7e-6 | 6.4e-7 | 6.4e-4 | 1.9e-3 | 1.2e-6 |
+
+The dWc1 and dWc2 errors are the same for both paths. They come from hidden units whose pre-activation is
+so close to 0 that fp32 and fp64 put it on different sides of the ReLU. On those 262k points, fwd+bwd goes
+from 4.94 ms to 2.19 ms (2.3×), and the no-grad forward from 1.71 to 0.45 ms. The three kernels take 0.57
+(fwd), 0.96 (bwd) and 0.67 ms (wgrad). Each of them moves about 250–500 MB of saved activations and
+gradients, so they are bound by memory bandwidth, not by math.
+
+| step (CUDA march + hash v1, fused density, fused Adam) | wall ms/step | it/s | field fwd | backward |
+|---|---|---|---|---|
+| torch MLPs | 11.52 | 86.8 | 2.04 | 4.96 |
+| fused training MLP | 8.71 | 114.8 | 0.71 | 3.38 |
+
+Lego 30k: 35.13 dB in 256 s (117.0 it/s). The peak memory goes from 4449 to 5494 MiB. That is the saved
+[N, 240] activations plus the [N, 212] gradient buffer, along with what the early large-batch steps keep alive.
+
 ## History
 
 - The first 30k run ran out of memory at iteration ~2500. `march` materialised [rays × 1024] candidates,
@@ -169,8 +206,9 @@ Lego 30k with both: 35.04 dB in 340 s (88.2 it/s). The quick test PSNR at 5k / 1
 
 ## Next
 
-1. Fused training MLP (density and color), forward and backward. The backward phase (4.9 ms) is now the
-   largest, and most of it is the MLPs' GEMMs and ReLU masks.
+1. Cut the fused MLP's memory traffic: recompute activations in the backward instead of saving them, and
+   reduce the weight gradients inside `mlp_bwd`, so the [N, 212] buffer is never written. WMMA for the layers
+   comes after that, because the kernels are bandwidth-bound now.
 2. Fuse the hash forward into the prune pass so the [1.1 M, 32] encoding is never written.
 3. Fused compositing / transmittance kernels.
 4. Comparison with tiny-cuda-nn.

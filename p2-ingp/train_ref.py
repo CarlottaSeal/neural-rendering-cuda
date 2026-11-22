@@ -57,6 +57,7 @@ def main():
     ap.add_argument("--march", default="torch", choices=["torch", "cuda"], help="ray marching backend")
     ap.add_argument("--fused_mlp", action="store_true", help="csrc/mlp.cu for the no-grad sigma queries")
     ap.add_argument("--fused_adam", action="store_true", help="torch.optim.Adam(fused=True)")
+    ap.add_argument("--fused_train_mlp", action="store_true", help="csrc/mlp_train.cu for the field forward and backward")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -70,6 +71,7 @@ def main():
     field = NGPField(aabb, log2_table=args.log2_table).to(dev)
     field.encoding.backend = args.encoding
     field.fused_mlp = args.fused_mlp
+    field.fused_train_mlp = args.fused_train_mlp
     grid = OccupancyGrid(aabb, device=dev)
 
     opt = torch.optim.Adam([

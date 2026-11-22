@@ -36,6 +36,7 @@ class NGPField(nn.Module):
         self.density_net = mlp(self.encoding.out_dim, width, 1, 16)
         self.color_net = mlp(15 + 16, width, 2, 3)
         self.fused_mlp = False  # csrc/mlp.cu for no-grad sigma queries (prune pass, occupancy update)
+        self.fused_train_mlp = False  # csrc/mlp_train.cu for the full field, forward and backward
 
     def normalize(self, x):
         lo, hi = self.aabb[:3], self.aabb[3:]
@@ -50,7 +51,14 @@ class NGPField(nn.Module):
         sigma = TruncExp.apply(h[:, 0])
         return (sigma, h[:, 1:]) if return_feat else sigma
 
+    def weights(self):
+        return [self.density_net[0].weight, self.density_net[2].weight,
+                self.color_net[0].weight, self.color_net[2].weight, self.color_net[4].weight]
+
     def forward(self, x, d):
+        if self.fused_train_mlp:
+            from .cuda_ext import FusedMLPFn
+            return FusedMLPFn.apply(self.encoding(self.normalize(x)), d, *self.weights())
         sigma, feat = self.density(x, return_feat=True)
         rgb = torch.sigmoid(self.color_net(torch.cat([feat, sh_encoding_deg4(d)], -1)))
         return sigma, rgb

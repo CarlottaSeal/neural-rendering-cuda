@@ -17,7 +17,7 @@ def ext():
     if _ext is None:
         _ext = load(
             name="ingp_cuda",
-            sources=[os.path.join(_SRC, f) for f in ("bindings.cpp", "hash_encoding.cu", "march.cu", "mlp.cu")],
+            sources=[os.path.join(_SRC, f) for f in ("bindings.cpp", "hash_encoding.cu", "march.cu", "mlp.cu", "mlp_train.cu")],
             extra_cuda_cflags=["-O3", "-lineinfo", "--use_fast_math"],
             verbose=False,
         )
@@ -37,3 +37,23 @@ class HashEncodeFn(torch.autograd.Function):
         x, res = ctx.saved_tensors
         L, T, F = ctx.shape
         return None, ext().hash_encode_bwd(x, g.contiguous(), res, T, F, ctx.version), None, None
+
+
+class FusedMLPFn(torch.autograd.Function):
+    """Density + color MLP in one kernel each way. Weights: Wd1 [64,32], Wd2 [16,64], Wc1 [64,31], Wc2 [64,64], Wc3 [3,64]."""
+
+    @staticmethod
+    def forward(ctx, enc, dirs, *ws):
+        enc, dirs = enc.contiguous(), dirs.contiguous()
+        ws = [w.contiguous() for w in ws]
+        sigma, rgb, act = ext().mlp_fwd(enc, dirs, ws, any(ctx.needs_input_grad))
+        ctx.save_for_backward(enc, act, rgb, *ws)
+        return sigma, rgb
+
+    @staticmethod
+    def backward(ctx, g_sigma, g_rgb):
+        enc, act, rgb, *ws = ctx.saved_tensors
+        g_sigma = torch.zeros_like(rgb[:, 0]) if g_sigma is None else g_sigma.contiguous()
+        g_rgb = torch.zeros_like(rgb) if g_rgb is None else g_rgb.contiguous()
+        g_enc, *dws = ext().mlp_bwd(enc, act, rgb, g_sigma, g_rgb, ws)
+        return (g_enc, None, *dws)

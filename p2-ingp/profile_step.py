@@ -19,6 +19,7 @@ import time
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from ingp.cuda_ext import FusedMLPFn  # noqa: E402
 from ingp.data import BlenderScene  # noqa: E402
 from ingp.encoding import sh_encoding_deg4  # noqa: E402
 from ingp.model import NGPField, TruncExp  # noqa: E402
@@ -73,11 +74,15 @@ def step(field, grid, scene, opt, n_rays, dt, ph, do_grid, march_backend, t_thre
         pts = o[ray_idx] + t[:, None] * d[ray_idx]
     with ph("encoding"):
         enc = field.encoding(field.normalize(pts))
-    with ph("density_mlp"):
-        h = field.density_net(enc)
-        sigma = TruncExp.apply(h[:, 0])
-    with ph("color_mlp"):
-        rgb = torch.sigmoid(field.color_net(torch.cat([h[:, 1:], sh_encoding_deg4(d[ray_idx])], -1)))
+    if field.fused_train_mlp:
+        with ph("density_mlp"):  # density and color in one kernel
+            sigma, rgb = FusedMLPFn.apply(enc, d[ray_idx], *field.weights())
+    else:
+        with ph("density_mlp"):
+            h = field.density_net(enc)
+            sigma = TruncExp.apply(h[:, 0])
+        with ph("color_mlp"):
+            rgb = torch.sigmoid(field.color_net(torch.cat([h[:, 1:], sh_encoding_deg4(d[ray_idx])], -1)))
     with ph("composite"):
         color, acc = composite(sigma, rgb, dt, ray_idx, n_rays)
         color = color + (1.0 - acc[:, None]) * bg
@@ -98,6 +103,7 @@ def main():
     ap.add_argument("--march", default="torch", choices=["torch", "cuda"], help="ray marching backend")
     ap.add_argument("--fused_mlp", action="store_true", help="csrc/mlp.cu for the no-grad sigma queries")
     ap.add_argument("--fused_adam", action="store_true", help="torch.optim.Adam(fused=True)")
+    ap.add_argument("--fused_train_mlp", action="store_true", help="csrc/mlp_train.cu for the field forward and backward")
     ap.add_argument("--target_samples", type=int, default=1 << 18)
     ap.add_argument("--grid_every", type=int, default=16)
     ap.add_argument("--adapt_steps", type=int, default=60)
@@ -115,6 +121,7 @@ def main():
     field.load_state_dict(torch.load(args.ckpt, map_location=dev))
     field.encoding.backend = args.backend
     field.fused_mlp = args.fused_mlp
+    field.fused_train_mlp = args.fused_train_mlp
     grid = OccupancyGrid(aabb, device=dev)
     for _ in range(30):  # running max with decay 0.95 settles in a few dozen updates
         grid.update(lambda p: field.density(p), dt)
@@ -144,7 +151,7 @@ def main():
 
     run(args.adapt_steps, None)
     it = 0  # so each measured run sees the same grid-update phase
-    res = {"backend": args.backend, "march": args.march, "fused_mlp": args.fused_mlp, "fused_adam": args.fused_adam, "steps": args.steps, "rays": n_rays, "occupancy": grid.occupancy}
+    res = {"backend": args.backend, "march": args.march, "fused_mlp": args.fused_mlp, "fused_adam": args.fused_adam, "fused_train_mlp": args.fused_train_mlp, "steps": args.steps, "rays": n_rays, "occupancy": grid.occupancy}
     if not args.nvtx_only:
         torch.cuda.synchronize()
         t0 = time.perf_counter()
